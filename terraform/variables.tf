@@ -45,11 +45,11 @@ variable "ssh_public_key" {
 variable "node_ocpus" {
   description = "OCPUs for the k3s node (Always Free A1 allowance is 4 total)"
   type        = number
-  default     = 2
+  default     = 1
 }
 
 variable "node_memory_gb" {
   description = "Memory in GB for the k3s node (Always Free A1 allowance is 24 total)"
   type        = number
-  default     = 8
+  default     = 6
 }
