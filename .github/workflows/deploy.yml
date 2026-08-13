@@ -1,0 +1,158 @@
+name: plan-and-deploy
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Never run two pipelines against the cluster/state at once.
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: "true"
+  # OCI's S3-compatible API rejects the AWS SDK's default integrity checksums
+  # ("AWS chunked encoding not supported"); only send them when required.
+  AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+  AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+
+jobs:
+  # Always runs (PRs and pushes). Produces the terraform diff in the job
+  # summary and, on pushes, saves the plan file so deploy applies exactly
+  # what was reviewed.
+  plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.OCI_S3_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.OCI_S3_SECRET_KEY }}
+      TF_VAR_tenancy_ocid: ${{ secrets.OCI_TENANCY_OCID }}
+      TF_VAR_user_ocid: ${{ secrets.OCI_USER_OCID }}
+      TF_VAR_fingerprint: ${{ secrets.OCI_FINGERPRINT }}
+      TF_VAR_oci_private_key: ${{ secrets.OCI_PRIVATE_KEY }}
+      TF_VAR_my_ip_cidr: ${{ secrets.MY_IP_CIDR }}
+      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - run: terraform fmt -check -recursive
+
+      - run: terraform init -input=false
+
+      - run: terraform validate
+
+      - run: terraform plan -input=false -out=tfplan
+
+      - name: Add plan diff to job summary
+        run: |
+          echo '## Terraform plan' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          terraform show -no-color tfplan >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload plan for the deploy job
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: terraform/tfplan
+          retention-days: 1
+
+  # Builds the app image on a native arm64 runner (free for public repos)
+  # and pushes it to OCIR tagged with the commit SHA.
+  build:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: sjc.ocir.io
+          username: ${{ secrets.OCIR_USERNAME }}
+          password: ${{ secrets.OCIR_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: app
+          platforms: linux/arm64
+          push: true
+          tags: |
+            sjc.ocir.io/ax9hmp43wxua/burrito/app:${{ github.sha }}
+            sjc.ocir.io/ax9hmp43wxua/burrito/app:latest
+
+  # Gated by the "production" environment: the run pauses here until approved
+  # in the GitHub UI. Then: terraform apply (the reviewed plan) + helm deploy.
+  deploy:
+    if: github.event_name == 'push'
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.OCI_S3_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.OCI_S3_SECRET_KEY }}
+      TF_VAR_tenancy_ocid: ${{ secrets.OCI_TENANCY_OCID }}
+      TF_VAR_user_ocid: ${{ secrets.OCI_USER_OCID }}
+      TF_VAR_fingerprint: ${{ secrets.OCI_FINGERPRINT }}
+      TF_VAR_oci_private_key: ${{ secrets.OCI_PRIVATE_KEY }}
+      TF_VAR_my_ip_cidr: ${{ secrets.MY_IP_CIDR }}
+      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - run: terraform init -input=false
+        working-directory: terraform
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: terraform
+
+      - name: Terraform apply (reviewed plan)
+        run: terraform apply -input=false tfplan
+        working-directory: terraform
+
+      - name: Write kubeconfig
+        run: |
+          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$RUNNER_TEMP/kubeconfig"
+          chmod 600 "$RUNNER_TEMP/kubeconfig"
+          echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
+
+      - name: Ensure namespace and OCIR pull secret
+        env:
+          OCIR_USERNAME: ${{ secrets.OCIR_USERNAME }}
+          OCIR_TOKEN: ${{ secrets.OCIR_TOKEN }}
+        run: |
+          kubectl create namespace burrito --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n burrito create secret docker-registry ocir-pull \
+            --docker-server=sjc.ocir.io \
+            --docker-username="$OCIR_USERNAME" \
+            --docker-password="$OCIR_TOKEN" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Helm deploy
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        run: |
+          helm upgrade --install burrito ./helm/burrito \
+            --namespace burrito \
+            --set image.tag="${{ github.sha }}" \
+            --set postgres.password="$POSTGRES_PASSWORD" \
+            --wait --timeout 5m
+
+      - name: Verify /healthz
+        run: |
+          IP=$(terraform -chdir=terraform output -raw node_public_ip)
+          curl -sf "http://$IP/healthz"

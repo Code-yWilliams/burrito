@@ -1,0 +1,14 @@
+# Headless governing service for the StatefulSet; also the DNS name the app
+# uses to reach Postgres (single replica, so it resolves to the one pod).
+apiVersion: v1
+kind: Service
+metadata:
+  name: burrito-postgres
+spec:
+  clusterIP: None
+  selector:
+    app: burrito-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres

@@ -1,0 +1,17 @@
+# Terraform — state is remote (OCI Object Storage); never commit state or creds
+terraform/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+terraform/terraform.tfvars
+
+# Cluster credentials
+kubeconfig*
+
+# Node
+node_modules/
+
+# Local env
+.env
+.DS_Store

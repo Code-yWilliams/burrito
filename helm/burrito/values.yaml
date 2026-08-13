@@ -1,0 +1,36 @@
+image:
+  repository: sjc.ocir.io/ax9hmp43wxua/burrito/app
+  tag: latest # overridden with the git SHA by CI
+  pullPolicy: IfNotPresent
+
+# Docker-registry secret for OCIR. Created/refreshed by CI with kubectl (not by
+# this chart) so registry credentials never live in Helm release history.
+imagePullSecret: ocir-pull
+
+app:
+  replicas: 1
+  port: 3000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+postgres:
+  image: postgres:16-alpine
+  database: burrito
+  user: burrito
+  password: "" # required — pass with --set postgres.password=... at deploy time
+  storage: 8Gi
+  storageClassName: local-path # k3s built-in provisioner (node-local disk)
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+ingress:
+  enabled: true
+  className: traefik # k3s built-in ingress controller
