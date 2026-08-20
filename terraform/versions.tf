@@ -6,6 +6,10 @@ terraform {
       source  = "oracle/oci"
       version = "~> 8.0"
     }
+    cloudflare = {
+      source  = "cloudflare/cloudflare"
+      version = "~> 5.0"
+    }
   }
 
   # Terraform state lives in OCI Object Storage via its S3-compatible API.

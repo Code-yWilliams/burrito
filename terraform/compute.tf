@@ -36,15 +36,20 @@ resource "oci_core_instance" "k3s" {
   }
 
   metadata = {
-    ssh_authorized_keys = var.ssh_public_key
-    user_data           = base64encode(file("${path.module}/cloud-init.yaml"))
+    ssh_authorized_keys = join("\n", [var.ssh_public_key, var.ci_ssh_public_key])
+    user_data = base64encode(templatefile("${path.module}/cloud-init.yaml.tpl", {
+      cloudflare_tunnel_token = data.cloudflare_zero_trust_tunnel_cloudflared_token.burrito.token
+    }))
   }
 
   preserve_boot_volume = false
 
   lifecycle {
     # A newer Ubuntu image being published must not force node replacement.
-    ignore_changes = [source_details]
+    # metadata (user_data/ssh_authorized_keys) is OCI-immutable post-create —
+    # any change there forces replacement too, so changes only take effect
+    # on a fresh node; the live node gets updated manually via SSH instead.
+    ignore_changes = [source_details, metadata]
   }
 }
 
