@@ -63,21 +63,9 @@ resource "oci_core_network_security_group_security_rule" "ssh" {
   }
 }
 
-resource "oci_core_network_security_group_security_rule" "k8s_api" {
-  network_security_group_id = oci_core_network_security_group.node.id
-  description               = "Kubernetes API (TLS + client-cert auth); open so GitHub Actions runners can deploy"
-  direction                 = "INGRESS"
-  protocol                  = "6"
-  source                    = "0.0.0.0/0"
-  source_type               = "CIDR_BLOCK"
-
-  tcp_options {
-    destination_port_range {
-      min = 6443
-      max = 6443
-    }
-  }
-}
+# No k8s API (6443) ingress rule: CI reaches the API via SSH port-forward
+# through the Cloudflare Tunnel (see terraform/cloudflare.tf), and local
+# kubectl uses the same forward over direct SSH (scripts/fetch-kubeconfig.sh).
 
 resource "oci_core_network_security_group_security_rule" "http" {
   network_security_group_id = oci_core_network_security_group.node.id
