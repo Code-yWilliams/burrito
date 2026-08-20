@@ -73,17 +73,53 @@ push, bypassing the `production` environment approval gate that every
 other deploy in this repo goes through (decision 0005). Direct upload
 keeps the build on GitHub runners inside the same gated `deploy` job.
 
+### Terraform-managed API token (rejected)
+
+The Cloudflare provider can manage API tokens (`cloudflare_api_token` /
+`cloudflare_account_token` resources exist in provider v5.23), which
+would codify the token's permission list as HCL. Rejected because the
+provider would then need a *second* bootstrap credential carrying the
+"API Tokens: Edit" permission to manage the first, and that bootstrap
+token can never itself be terraform-managed — the root credential always
+ends in a manual dashboard step, so recursion just moves the
+undocumented-scope problem up one level while adding a strictly more
+powerful secret (one that can mint arbitrary tokens) to the vault.
+Terraform also cannot introspect its own token's scopes at plan time, so
+a managed token would not have caught the August 2026 incident below any
+earlier. Instead the scope list is codified as an executable check:
+`scripts/check-cloudflare-token.sh` probes every Cloudflare API family
+the config touches, and CI runs it before every `terraform plan` and
+before every apply. If the repo ever has multiple operators, a
+reasonable evolution is a terraform-managed *deploy-only* token (Pages:
+Edit only) for wrangler, with the hand-managed token kept for terraform.
+
 ## Gotchas
 
-- **Cloudflare API token scope.** The shared token
-  (`TF_VAR_cloudflare_api_token` on the `burrito-ci` 1Password item) was
-  originally scoped to Tunnel/Access/DNS edit + Zone read. Both the
-  `cloudflare_pages_*` terraform resources and `wrangler pages deploy`
-  additionally need the account-level **"Cloudflare Pages: Edit"**
-  permission. `terraform plan` succeeds without it (creating new
-  resources needs no API reads at plan time) — the failure only appears
-  at apply/deploy time as an authentication error, so widen the token
-  scope in the Cloudflare dashboard *before* merging.
+- **Cloudflare API token scope — observed failure, August 2026.** The
+  shared token (`TF_VAR_cloudflare_api_token` on the `burrito-ci`
+  1Password item) was originally scoped to Tunnel/Access/DNS edit + Zone
+  read. Both the `cloudflare_pages_*` terraform resources and
+  `wrangler pages deploy` additionally need the account-level
+  **"Cloudflare Pages: Edit"** permission. `terraform plan` succeeds
+  without it (creating new resources needs no API reads at plan time).
+  The first Pages deploy (PR #11) failed mid-apply with:
+
+      Error: failed to make http request
+      POST "https://api.cloudflare.com/client/v4/accounts/.../pages/projects":
+      403 Forbidden
+      {"success":false,"errors":[{"code":10000,"message":"Authentication error"}]}
+
+  Root cause: the deploy job started before the dashboard scope edit
+  took effect. The apply had already created `cloudflare_dns_record.api`
+  and updated the tunnel config before failing, which advanced the state
+  and made the reviewed plan artifact stale — re-running the deploy job
+  would hit terraform's "Saved plan is stale" error, so recovery is a
+  fresh PR (decision 0005's standard recovery), not a re-run. The fix:
+  `scripts/check-cloudflare-token.sh` now runs before every plan and
+  every apply, failing fast with the dashboard name of any missing
+  permission. That script is the canonical scope list; the
+  `cloudflare_api_token` variable in `terraform/variables.tf` mirrors it
+  in prose.
 - **First-deploy latency.** The custom-domain certificate for
   `burrito.moldysandwich.com` is issued on first use and can take a few
   minutes; the deploy job's "Verify frontend" step retries for 5 minutes
