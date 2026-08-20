@@ -1,8 +1,11 @@
 # burrito
 
 Bare-minimum production cloud on OCI's Always Free tier: a single-node
-[k3s](https://k3s.io) cluster running a Node.js backend (one `GET /healthz`
-endpoint) and Postgres.
+[k3s](https://k3s.io) cluster running an Express API (one `GET /healthz`
+endpoint) and Postgres, plus a React SPA on Cloudflare Pages that calls it.
+
+Live: <https://burrito.moldysandwich.com> (frontend) →
+<https://api-burrito.moldysandwich.com/healthz> (API).
 
 ## Architecture
 
@@ -10,19 +13,30 @@ endpoint) and Postgres.
   a `VM.Standard.A1.Flex` (4 OCPU / 24 GB, Always Free) Ubuntu 24.04 arm64
   instance with a reserved public IP. cloud-init installs k3s on first boot.
   State lives in an OCI Object Storage bucket (`burrito-tfstate`, versioned)
-  via the S3-compatible backend.
-- **App (app/)** — dependency-free Node HTTP server + `pg`. `GET /healthz`
+  via the S3-compatible backend. Cloudflare (tunnel, DNS, Pages project,
+  custom domain) is terraform-managed too (`cloudflare.tf`, `frontend.tf`).
+- **API (app/)** — Express 5 + TypeScript. `GET /healthz`
   runs `SELECT 1` against Postgres: `200 {status: ok, db: ok}` when healthy,
-  `503` when the DB is unreachable. Docker image is arm64, pushed to OCIR
+  `503` when the DB is unreachable. CORS is an explicit origin allowlist
+  (`ALLOWED_ORIGINS`, set by the chart): the Pages frontend plus local dev.
+  Docker image is arm64, pushed to OCIR
   (`sjc.ocir.io/ax9hmp43wxua/burrito/app`).
-- **Chart (helm/burrito/)** — app Deployment/Service/Ingress (k3s Traefik,
-  plain HTTP on the node IP) and a Postgres 16 StatefulSet with an 8 Gi PVC
-  on k3s's local-path provisioner.
+- **Web (web/)** — Vite + React 19 + TypeScript SPA: a single page that
+  fetches the API's `/healthz` and renders the response. Served by
+  Cloudflare Pages (direct-upload project `burrito-web`; HTTPS automatic)
+  at `burrito.moldysandwich.com`.
+- **Chart (helm/burrito/)** — app Deployment/Service/Ingress (k3s Traefik)
+  and a Postgres 16 StatefulSet with an 8 Gi PVC on k3s's local-path
+  provisioner. Public traffic reaches Traefik as
+  `https://api-burrito.moldysandwich.com` through the Cloudflare Tunnel
+  (TLS terminates at Cloudflare's edge — no certs on the node).
 - **CI/CD (.github/workflows/deploy.yml)** — on every PR and push to main:
-  `terraform plan`, diff in the job summary. On pushes, an image build to
-  OCIR runs too, then the run **pauses on the `production` environment**;
-  approving it in the GitHub UI applies the reviewed plan file and runs
-  `helm upgrade --install`, then curls `/healthz`.
+  both packages built (`check`) and `terraform plan`, diff in the job
+  summary. On merge, an image build to OCIR runs too, then the run
+  **pauses on the `production` environment**; approving it in the GitHub
+  UI applies the reviewed plan file, runs `helm upgrade --install`,
+  verifies `/healthz` over HTTPS, then uploads the frontend build with
+  `wrangler pages deploy` and verifies it too.
 
 ### Why AWS_* variables in an OCI project?
 
@@ -105,12 +119,18 @@ current (no stored kubeconfig to go stale when the node is recreated).
 Local kubectl uses the same port-forward trick over direct SSH (port 22
 is open to `my_ip_cidr` only).
 
+The same tunnel also publishes the app: `api-burrito.moldysandwich.com`
+routes to Traefik on `localhost:80`, deliberately with **no** Access
+policy (it's the public API), unlike the SSH hostname.
+
 ## Known MVP tradeoffs
 
 - CI authenticates with the tenancy admin's API key; a least-privilege
   `burrito-ci` IAM user/policy is the natural next step.
-- Plain HTTP, no domain/TLS on the app ingress (the Cloudflare Tunnel
-  could front the app too — natural next step now that it exists).
+- The node's ports 80/443 are still open to the world (plain HTTP on the
+  node IP reaches Traefik directly, bypassing Cloudflare). The advertised
+  path is HTTPS via the tunnel, so removing those NSG rules is the natural
+  next step once the tunnel path has been verified in production.
 - Postgres data lives on the node's boot volume (single node, no offsite
   backups).
 - Only one SSH public key is trusted on the node (see Getting started) —

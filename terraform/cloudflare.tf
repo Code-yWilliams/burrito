@@ -1,9 +1,13 @@
-# SSH-over-tunnel replaces the k8s API's public NSG exposure: CI reaches
-# the node only through this tunnel (an outbound-only connection from the
-# node to Cloudflare's edge), authenticated by the Access policy below,
-# then runs kubectl/helm locally on the node over that SSH session using
-# its own always-current kubeconfig. See network.tf for the corresponding
-# k8s_api NSG rule removal (done in a follow-up once this is verified).
+# The tunnel (an outbound-only connection from the node to Cloudflare's
+# edge) carries two hostnames with very different exposure:
+#   - ssh-burrito: CI's SSH path to the node, locked to the CI service
+#     token by the Access policy below. Replaces the k8s API's public NSG
+#     exposure — CI runs kubectl/helm over this SSH session using the
+#     node's own always-current kubeconfig.
+#   - api-burrito: the public HTTPS front for the app. Cloudflare
+#     terminates TLS at the edge and hands requests to Traefik on the
+#     node's localhost:80 — no cert management on the node, and
+#     deliberately NO Access application (it's a public API).
 
 data "cloudflare_zones" "moldysandwich" {
   name = "moldysandwich.com"
@@ -12,6 +16,8 @@ data "cloudflare_zones" "moldysandwich" {
 locals {
   cloudflare_zone_id  = data.cloudflare_zones.moldysandwich.result[0].id
   ssh_tunnel_hostname = "ssh-burrito.moldysandwich.com"
+  api_hostname        = "api-burrito.moldysandwich.com"
+  web_hostname        = "burrito.moldysandwich.com"
 }
 
 resource "cloudflare_zero_trust_tunnel_cloudflared" "burrito" {
@@ -36,6 +42,12 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "burrito" {
         service  = "ssh://localhost:22"
       },
       {
+        # k3s Traefik listens on the node's port 80 and routes to the app;
+        # cloudflared runs on the same node, so localhost reaches it.
+        hostname = local.api_hostname
+        service  = "http://localhost:80"
+      },
+      {
         service = "http_status:404"
       }
     ]
@@ -45,6 +57,17 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "burrito" {
 resource "cloudflare_dns_record" "ssh_tunnel" {
   zone_id = local.cloudflare_zone_id
   name    = "ssh-burrito"
+  type    = "CNAME"
+  content = "${cloudflare_zero_trust_tunnel_cloudflared.burrito.id}.cfargotunnel.com"
+  proxied = true
+  ttl     = 1
+}
+
+# Must be proxied: TLS terminates at Cloudflare's edge and the record's
+# target only resolves inside Cloudflare's network.
+resource "cloudflare_dns_record" "api" {
+  zone_id = local.cloudflare_zone_id
+  name    = "api-burrito"
   type    = "CNAME"
   content = "${cloudflare_zero_trust_tunnel_cloudflared.burrito.id}.cfargotunnel.com"
   proxied = true

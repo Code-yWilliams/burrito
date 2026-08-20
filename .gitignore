@@ -11,6 +11,7 @@ kubeconfig*
 
 # Node
 node_modules/
+dist/
 
 # Local env
 .env

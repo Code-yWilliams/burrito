@@ -28,3 +28,4 @@ Index:
 - [0004 — OCI instance metadata is immutable; the bootstrap-script pattern](0004-oci-metadata-immutability.md)
 - [0005 — CI applies the exact reviewed plan artifact; merge-timing rule](0005-plan-artifact-gating.md)
 - [0006 — Platform constraints: OCI free tier, single node, SSH trust](0006-platform-constraints.md)
+- [0007 — HTTPS everywhere: API through the Cloudflare Tunnel, frontend on Cloudflare Pages](0007-https-tunnel-api-pages-frontend.md)

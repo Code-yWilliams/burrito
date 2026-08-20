@@ -1,6 +1,6 @@
 apiVersion: v2
 name: burrito
-description: Burrito MVP — Node.js backend with a Postgres database
+description: Burrito MVP — Express API with a Postgres database
 type: application
-version: 0.1.0
-appVersion: "1.0.0"
+version: 0.2.0
+appVersion: "2.0.0"
