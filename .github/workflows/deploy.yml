@@ -18,6 +18,9 @@ env:
   # repo variable (Settings > Secrets and variables > Actions > Variables)
   # rather than duplicated as a literal across this file and values.yaml.
   OCI_REGISTRY: sjc.ocir.io/${{ vars.OCI_NAMESPACE }}
+  # Not secret (same value as the terraform/variables.tf default); wrangler
+  # needs it to target the right account for Pages deploys.
+  CLOUDFLARE_ACCOUNT_ID: a2307e3c074e5ba8067e3220eeaf53c0
   TF_IN_AUTOMATION: "true"
   # OCI's S3-compatible API rejects the AWS SDK's default integrity checksums
   # ("AWS chunked encoding not supported"); only send them when required.
@@ -25,6 +28,27 @@ env:
   AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
 
 jobs:
+  # Typechecks and builds both packages on every PR push. Needs no secrets,
+  # so it also runs on forked PRs (unlike plan). Catches TS/build breakage
+  # before merge — the Docker image build only happens post-merge.
+  check:
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build API
+        run: npm ci && npm run build
+        working-directory: app
+
+      - name: Build frontend
+        run: npm ci && npm run build
+        working-directory: web
+
   # Runs for every PR push (opened/synchronize/reopened) and for direct
   # pushes to main, but NOT for the PR "closed" event. Produces the
   # terraform diff in the job summary and uploads the plan file, keyed to
@@ -245,17 +269,53 @@ jobs:
             --set postgres.password="$POSTGRES_PASSWORD" \
             --wait --timeout 5m
 
+      # Hits the public HTTPS hostname, so this exercises the whole path:
+      # DNS -> Cloudflare edge TLS -> tunnel -> Traefik -> app -> Postgres.
       # Retried because the pod rollover can serve a brief 503 right after
-      # helm --wait returns (readiness gates the pod, not the app→DB path).
-      - name: Verify /healthz
+      # helm --wait returns (readiness gates the pod, not the app→DB path),
+      # and on the first rollout the tunnel ingress rule / DNS record from
+      # the terraform apply above take a little while to propagate.
+      - name: Verify /healthz over HTTPS
         run: |
-          IP=$(terraform -chdir=terraform output -raw node_public_ip)
-          for i in $(seq 1 12); do
-            if curl -sf "http://$IP/healthz"; then
+          for i in $(seq 1 24); do
+            if curl -sf "https://api-burrito.moldysandwich.com/healthz"; then
               exit 0
             fi
             echo "healthz not ready yet (attempt $i), retrying in 5s..."
             sleep 5
           done
-          echo "::error::/healthz did not return 200 within 60s"
+          echo "::error::/healthz did not return 200 within 2m"
+          exit 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build frontend
+        run: npm ci && npm run build
+        working-directory: web
+
+      # Uploads the build to the Pages project terraform manages
+      # (frontend.tf). Reuses the terraform Cloudflare token, which must
+      # carry the account-level "Cloudflare Pages: Edit" permission.
+      - name: Deploy frontend to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ env.TF_VAR_cloudflare_api_token }}
+          accountId: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy web/dist --project-name=burrito-web --branch=main
+
+      # Generous retry window: the very first deploy has to wait for
+      # Cloudflare to issue the custom-domain certificate.
+      - name: Verify frontend
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null "https://burrito.moldysandwich.com/"; then
+              echo "frontend OK"
+              exit 0
+            fi
+            echo "frontend not ready yet (attempt $i), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::https://burrito.moldysandwich.com did not return 200 within 5m"
           exit 1
