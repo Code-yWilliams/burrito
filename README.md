@@ -64,17 +64,19 @@ the repo — no tfvars file, no manually-exported env vars, no local secrets.
 `terraform` commands work directly from `terraform/`.
 
 Local `kubectl` access is separate: `scripts/fetch-kubeconfig.sh <node-ip>`
-SSHes into the node with `~/.ssh/burrito_k3s`, but the node currently only
-trusts a single public key (`TF_VAR_ssh_public_key` in the vault). A second
-person needing kubectl access would need either their own key added to the
-instance (a terraform change — not set up yet) or the private key shared
-directly (not recommended).
+SSHes into the node with `~/.ssh/burrito_k3s`, but the node only trusts two
+keys — the owner's personal key (`TF_VAR_ssh_public_key` in the vault) and
+the CI deploy key. A second person needing kubectl access would need their
+own key added to the instance (a terraform change — not set up yet) rather
+than sharing a private key directly (not recommended).
 
 ## Day-to-day
 
 - Change infra or app → PR (plan diff, no apply) → merge → approve the
   `production` deployment in the Actions UI → applied + deployed.
-- Local kubectl: `scripts/fetch-kubeconfig.sh <node-ip>` then
+- Local kubectl: `scripts/fetch-kubeconfig.sh <node-ip>` fetches the node's
+  kubeconfig (it points at `https://127.0.0.1:6443` — the k8s API is not
+  publicly exposed), then open the SSH port-forward the script prints and
   `KUBECONFIG=kubeconfig kubectl get nodes`.
 - Local terraform: `direnv` handles everything (see Getting started above)
   — just run `terraform` normally from `terraform/`.
@@ -84,22 +86,33 @@ directly (not recommended).
 `OP_SERVICE_ACCOUNT_TOKEN` is the only GitHub secret this repo needs — a
 1Password Service Account token, scoped read-only to the `Burrito` vault.
 Every other value (OCI/AWS/OCIR/Postgres creds, the SSH allowlist IP, the
-base64 kubeconfig) lives as a field on the `burrito-ci` item in that vault
-and is pulled in per job by the `1password/load-secrets-action` step —
-the same vault item local dev reads via `.env.tpl`/direnv.
+Cloudflare Access service token and CI SSH key) lives as a field on the
+`burrito-ci` item in that vault and is pulled in per job by the
+`1password/load-secrets-action` step — the same vault item local dev reads
+via `.env.tpl`/direnv.
+
+## Deploy path (no public k8s API)
+
+The k8s API (6443) has no public ingress rule at all. The deploy job
+reaches it by SSHing to the node through a **Cloudflare Tunnel**
+(`terraform/cloudflare.tf`): the node runs `cloudflared` (installed by
+`scripts/bootstrap-cloudflared.sh` via cloud-init) holding an
+outbound-only connection to Cloudflare's edge, and a Cloudflare Access
+**Service Auth** policy admits only the dedicated CI service token —
+nothing else can even open a connection. The runner then port-forwards
+6443 and uses the node's own `/etc/rancher/k3s/k3s.yaml`, which is always
+current (no stored kubeconfig to go stale when the node is recreated).
+Local kubectl uses the same port-forward trick over direct SSH (port 22
+is open to `my_ip_cidr` only).
 
 ## Known MVP tradeoffs
 
 - CI authenticates with the tenancy admin's API key; a least-privilege
   `burrito-ci` IAM user/policy is the natural next step.
-- k8s API (6443) is exposed publicly (TLS + client-cert auth) so GitHub
-  runners can deploy; alternatives are SSH-tunnel deploys or a self-hosted
-  runner.
-- Plain HTTP, no domain/TLS on the app ingress.
+- Plain HTTP, no domain/TLS on the app ingress (the Cloudflare Tunnel
+  could front the app too — natural next step now that it exists).
 - Postgres data lives on the node's boot volume (single node, no offsite
-  backups). If the node is recreated, k3s regenerates its CA — refetch the
-  kubeconfig and update the `KUBECONFIG_B64` field on the `burrito-ci` item
-  in 1Password.
+  backups).
 - Only one SSH public key is trusted on the node (see Getting started) —
   fine for a single operator, but doesn't scale to a second person without
   a terraform change.
