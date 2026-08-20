@@ -17,7 +17,7 @@ runs:
   using: composite
   steps:
     - name: Upload to Cloudflare Pages
-      uses: cloudflare/wrangler-action@v3
+      uses: cloudflare/wrangler-action@v4
       with:
         apiToken: ${{ inputs.cloudflare-api-token }}
         accountId: ${{ inputs.cloudflare-account-id }}

@@ -35,9 +35,9 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -61,10 +61,10 @@ jobs:
       run:
         working-directory: terraform
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Load secrets from 1Password
-        uses: 1password/load-secrets-action@v2
+        uses: 1password/load-secrets-action@v5
         with:
           export-env: true
         env:
@@ -88,7 +88,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ env.TF_VAR_cloudflare_api_token }}
         run: scripts/check-cloudflare-token.sh "$CLOUDFLARE_ACCOUNT_ID"
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_wrapper: false
 
@@ -108,7 +108,7 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload plan for the deploy job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tfplan-${{ github.event.pull_request.head.sha || github.sha }}
           path: terraform/tfplan
@@ -162,12 +162,12 @@ jobs:
     steps:
       # Build from the actual commit that landed on main, not the
       # ephemeral pull_request merge-preview ref.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
 
       - name: Load secrets from 1Password
-        uses: 1password/load-secrets-action@v2
+        uses: 1password/load-secrets-action@v5
         with:
           export-env: true
         env:
@@ -175,13 +175,13 @@ jobs:
           OCIR_USERNAME: op://Burrito/burrito-ci/OCIR_USERNAME
           OCIR_TOKEN: op://Burrito/burrito-ci/OCIR_TOKEN
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: sjc.ocir.io
           username: ${{ env.OCIR_USERNAME }}
           password: ${{ env.OCIR_TOKEN }}
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: app
           platforms: linux/arm64
@@ -219,12 +219,12 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
 
       - name: Load secrets from 1Password
-        uses: 1password/load-secrets-action@v2
+        uses: 1password/load-secrets-action@v5
         with:
           export-env: true
         env:
@@ -256,7 +256,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ env.TF_VAR_cloudflare_api_token }}
         run: scripts/check-cloudflare-token.sh "$CLOUDFLARE_ACCOUNT_ID"
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_wrapper: false
 
@@ -280,7 +280,7 @@ jobs:
           echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
 
       - name: Download the exact plan reviewed in the PR
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: tfplan-${{ github.event.pull_request.head.sha }}
           run-id: ${{ steps.find_run.outputs.run_id }}
@@ -293,7 +293,7 @@ jobs:
 
       # ---- Build phase: everything compiles before anything deploys. ----
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: needs.changes.outputs.web == 'true'
         with:
           node-version: 22
