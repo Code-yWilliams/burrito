@@ -105,6 +105,12 @@ Cloudflare Access service token and CI SSH key) lives as a field on the
 `1password/load-secrets-action` step — the same vault item local dev reads
 via `.env.tpl`/direnv.
 
+The Cloudflare API token is created by hand in the dashboard, so its
+required permissions are codified as an executable check:
+`scripts/check-cloudflare-token.sh` (run by CI before every plan and
+apply) is the canonical scope list — update it when terraform grows a new
+Cloudflare resource family.
+
 ## Deploy path (no public k8s API)
 
 The k8s API (6443) has no public ingress rule at all. The deploy job

@@ -49,7 +49,14 @@ variable "ci_ssh_public_key" {
 }
 
 variable "cloudflare_api_token" {
-  description = "Cloudflare API token (Tunnel/Access/DNS edit, Zone read)"
+  # Required permissions (Cloudflare dashboard names) — account-level:
+  # "Cloudflare Tunnel: Edit", "Access: Apps and Policies: Edit",
+  # "Access: Service Tokens: Edit", "Cloudflare Pages: Edit"; zone-level
+  # (moldysandwich.com): "DNS: Edit", "Zone: Read". The token is created
+  # by hand in the dashboard (terraform can't manage its own credential),
+  # so scripts/check-cloudflare-token.sh is the executable source of
+  # truth — CI runs it before every plan and apply. See decision 0007.
+  description = "Cloudflare API token; required scopes are codified in scripts/check-cloudflare-token.sh"
   type        = string
   sensitive   = true
 }

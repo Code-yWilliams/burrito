@@ -79,6 +79,15 @@ jobs:
           TF_VAR_my_ip_cidr: op://Burrito/burrito-ci/TF_VAR_my_ip_cidr
           TF_VAR_cloudflare_api_token: op://Burrito/burrito-ci/TF_VAR_cloudflare_api_token
 
+      # Fail the PR (not a mid-apply 403 after merge) when the hand-managed
+      # Cloudflare token is missing a permission the config needs. The
+      # script is the canonical list of required scopes.
+      - name: Verify Cloudflare token scopes
+        working-directory: .
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ env.TF_VAR_cloudflare_api_token }}
+        run: scripts/check-cloudflare-token.sh "$CLOUDFLARE_ACCOUNT_ID"
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
@@ -184,6 +193,15 @@ jobs:
           # ProxyCommand below needs no credential flags.
           TUNNEL_SERVICE_TOKEN_ID: op://Burrito/burrito-ci/CF_ACCESS_CLIENT_ID
           TUNNEL_SERVICE_TOKEN_SECRET: op://Burrito/burrito-ci/CF_ACCESS_CLIENT_SECRET
+
+      # Re-checked here (not just at plan time) because the token can be
+      # edited between merge and approval; a missing scope at apply time
+      # 403s halfway through and leaves the reviewed plan stale (the
+      # August 2026 Pages rollout failed exactly this way).
+      - name: Verify Cloudflare token scopes
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ env.TF_VAR_cloudflare_api_token }}
+        run: scripts/check-cloudflare-token.sh "$CLOUDFLARE_ACCOUNT_ID"
 
       - uses: hashicorp/setup-terraform@v3
         with:
