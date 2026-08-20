@@ -9,3 +9,7 @@ provider "oci" {
   private_key_path = var.oci_private_key_path != "" ? var.oci_private_key_path : null
   region           = var.region
 }
+
+provider "cloudflare" {
+  api_token = var.cloudflare_api_token
+}

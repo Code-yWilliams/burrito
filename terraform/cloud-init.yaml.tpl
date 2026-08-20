@@ -17,3 +17,10 @@ runcmd:
     until PUBLIC_IP=$(curl -sf --max-time 5 https://checkip.amazonaws.com); do sleep 5; done
     PUBLIC_IP=$(echo "$PUBLIC_IP" | tr -d '[:space:]')
     curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=stable INSTALL_K3S_EXEC="server --tls-san $PUBLIC_IP" sh -
+  # cloudflared: the only path CI uses to reach this node (SSH over an
+  # outbound-only tunnel) — the k8s API itself is never exposed publicly.
+  - curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg -o /usr/share/keyrings/cloudflare-main.gpg
+  - echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' > /etc/apt/sources.list.d/cloudflared.list
+  - apt-get update
+  - apt-get install -y cloudflared
+  - cloudflared service install ${cloudflare_tunnel_token}

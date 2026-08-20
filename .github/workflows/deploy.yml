@@ -53,6 +53,7 @@ jobs:
           TF_VAR_oci_private_key: op://Burrito/burrito-ci/TF_VAR_oci_private_key
           TF_VAR_ssh_public_key: op://Burrito/burrito-ci/TF_VAR_ssh_public_key
           TF_VAR_my_ip_cidr: op://Burrito/burrito-ci/TF_VAR_my_ip_cidr
+          TF_VAR_cloudflare_api_token: op://Burrito/burrito-ci/TF_VAR_cloudflare_api_token
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -150,6 +151,7 @@ jobs:
           TF_VAR_oci_private_key: op://Burrito/burrito-ci/TF_VAR_oci_private_key
           TF_VAR_ssh_public_key: op://Burrito/burrito-ci/TF_VAR_ssh_public_key
           TF_VAR_my_ip_cidr: op://Burrito/burrito-ci/TF_VAR_my_ip_cidr
+          TF_VAR_cloudflare_api_token: op://Burrito/burrito-ci/TF_VAR_cloudflare_api_token
           OCIR_USERNAME: op://Burrito/burrito-ci/OCIR_USERNAME
           OCIR_TOKEN: op://Burrito/burrito-ci/OCIR_TOKEN
           POSTGRES_PASSWORD: op://Burrito/burrito-ci/POSTGRES_PASSWORD

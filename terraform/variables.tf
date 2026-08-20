@@ -38,8 +38,26 @@ variable "my_ip_cidr" {
 }
 
 variable "ssh_public_key" {
-  description = "SSH public key installed on the k3s node"
+  description = "SSH public key installed on the k3s node (personal access)"
   type        = string
+}
+
+variable "ci_ssh_public_key" {
+  description = "SSH public key for the dedicated CI identity, reached only via the Cloudflare Tunnel (never a broadened NSG rule). Not secret; the matching private key lives in 1Password as CI_SSH_PRIVATE_KEY."
+  type        = string
+  default     = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICPE40DBooP7feS9JI5Ubo1t8WtFp7TLm6QwORWqe6ou burrito-ci"
+}
+
+variable "cloudflare_api_token" {
+  description = "Cloudflare API token (Tunnel/Access/DNS edit, Zone read)"
+  type        = string
+  sensitive   = true
+}
+
+variable "cloudflare_account_id" {
+  description = "Cloudflare account ID (not secret, just an identifier)"
+  type        = string
+  default     = "a2307e3c074e5ba8067e3220eeaf53c0"
 }
 
 variable "node_ocpus" {
