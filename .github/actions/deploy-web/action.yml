@@ -1,0 +1,40 @@
+name: Deploy frontend
+description: >-
+  Upload the already-built web/dist to the Cloudflare Pages project
+  terraform manages (frontend.tf) and verify the custom domain serves
+  200. Defined as a local action because the deploy job invokes it at
+  one of two points depending on the ordering label (web-first or not).
+  The build itself deliberately stays a separate earlier step, so a
+  broken frontend build fails the run before anything has deployed.
+inputs:
+  cloudflare-api-token:
+    description: Cloudflare API token (needs account-level Cloudflare Pages Edit)
+    required: true
+  cloudflare-account-id:
+    description: Cloudflare account id
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Upload to Cloudflare Pages
+      uses: cloudflare/wrangler-action@v3
+      with:
+        apiToken: ${{ inputs.cloudflare-api-token }}
+        accountId: ${{ inputs.cloudflare-account-id }}
+        command: pages deploy web/dist --project-name=burrito-web --branch=main
+
+    # Generous retry window: a first-ever deploy has to wait for
+    # Cloudflare to issue the custom-domain certificate.
+    - name: Verify frontend
+      shell: bash
+      run: |
+        for i in $(seq 1 30); do
+          if curl -sf -o /dev/null "https://burrito.moldysandwich.com/"; then
+            echo "frontend OK"
+            exit 0
+          fi
+          echo "frontend not ready yet (attempt $i), retrying in 10s..."
+          sleep 10
+        done
+        echo "::error::https://burrito.moldysandwich.com did not return 200 within 5m"
+        exit 1

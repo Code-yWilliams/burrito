@@ -29,3 +29,4 @@ Index:
 - [0005 — CI applies the exact reviewed plan artifact; merge-timing rule](0005-plan-artifact-gating.md)
 - [0006 — Platform constraints: OCI free tier, single node, SSH trust](0006-platform-constraints.md)
 - [0007 — HTTPS everywhere: API through the Cloudflare Tunnel, frontend on Cloudflare Pages](0007-https-tunnel-api-pages-frontend.md)
+- [0008 — Selective deploys, deploy ordering, and per-package rollback](0008-selective-ordered-deploys-rollback.md)

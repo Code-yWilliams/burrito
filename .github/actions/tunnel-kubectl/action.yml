@@ -1,0 +1,45 @@
+name: Tunnel kubectl access
+description: >-
+  Open SSH to the k3s node through the Cloudflare Tunnel (gated by the
+  Access Service Auth policy that admits only the CI service token),
+  fetch the node's own kubeconfig, and background-port-forward the k8s
+  API to 127.0.0.1:6443 — exactly where /etc/rancher/k3s/k3s.yaml points,
+  so it needs no rewriting and is always current, even right after a node
+  recreation regenerates the CA. Requires TUNNEL_SERVICE_TOKEN_ID and
+  TUNNEL_SERVICE_TOKEN_SECRET in the job env (cloudflared reads those
+  names natively, so the SSH ProxyCommand needs no credential flags).
+inputs:
+  ci-ssh-private-key:
+    description: Private key for the dedicated CI SSH identity on the node
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install cloudflared
+      shell: bash
+      run: |
+        curl -fsSL -o /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+        sudo dpkg -i /tmp/cloudflared.deb
+
+    - name: Open tunnel to the node and fetch its kubeconfig
+      shell: bash
+      env:
+        CI_SSH_KEY: ${{ inputs.ci-ssh-private-key }}
+      run: |
+        mkdir -p ~/.ssh
+        printf '%s\n' "$CI_SSH_KEY" > ~/.ssh/ci_key
+        chmod 600 ~/.ssh/ci_key
+        cat >> ~/.ssh/config <<'EOF'
+        Host burrito-node
+          HostName ssh-burrito.moldysandwich.com
+          User ubuntu
+          IdentityFile ~/.ssh/ci_key
+          StrictHostKeyChecking accept-new
+          ProxyCommand cloudflared access ssh --hostname %h
+        EOF
+        ssh burrito-node "sudo cat /etc/rancher/k3s/k3s.yaml" > "$RUNNER_TEMP/kubeconfig"
+        chmod 600 "$RUNNER_TEMP/kubeconfig"
+        echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
+        # Background port-forward; the process outlives this step, so later
+        # kubectl/helm steps reach the API at 127.0.0.1:6443.
+        ssh -f -N -L 6443:127.0.0.1:6443 burrito-node

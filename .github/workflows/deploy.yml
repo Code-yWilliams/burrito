@@ -114,11 +114,50 @@ jobs:
           path: terraform/tfplan
           retention-days: 5
 
+  # Classifies the merged PR's changed files so the jobs below build and
+  # deploy only the packages that actually changed. Docs-only merges skip
+  # the deploy job — and its production-approval pause — entirely.
+  changes:
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      api: ${{ steps.classify.outputs.api }}
+      web: ${{ steps.classify.outputs.web }}
+      infra: ${{ steps.classify.outputs.infra }}
+    steps:
+      - name: Classify the PR's changed files
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          api=false; web=false; infra=false
+          while IFS= read -r f; do
+            case "$f" in
+              # helm/ counts as an API change (not just infra) so the image
+              # is rebuilt too — keeping the invariant that whenever helm
+              # deploys, an image tagged with this merge SHA exists.
+              app/*|helm/*) api=true ;;
+              web/*) web=true ;;
+              terraform/*|scripts/*) infra=true ;;
+              # Pipeline changes could affect any of the paths: deploy all.
+              .github/*) api=true; web=true; infra=true ;;
+            esac
+          done < <(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --paginate --jq '.[].filename')
+          echo "api=$api"     >> "$GITHUB_OUTPUT"
+          echo "web=$web"     >> "$GITHUB_OUTPUT"
+          echo "infra=$infra" >> "$GITHUB_OUTPUT"
+          echo "api=$api web=$web infra=$infra"
+
   # Builds the app image on a native arm64 runner (free for public repos)
   # and pushes it to OCIR tagged with the commit SHA. Only runs once a PR
-  # is actually merged — never for a plain push to main.
+  # is actually merged — never for a plain push to main — and only when
+  # the PR touched the API (app/ or helm/).
   build:
-    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
+    needs: changes
+    if: needs.changes.outputs.api == 'true'
     runs-on: ubuntu-24.04-arm
     steps:
       # Build from the actual commit that landed on main, not the
@@ -157,9 +196,23 @@ jobs:
   # is provably what was reviewed pre-merge. Branch protection requires the
   # "plan" check to pass before a PR can merge, which guarantees that
   # artifact exists by the time this job looks for it.
+  #
+  # Everything builds before anything deploys (a broken frontend build can
+  # no longer strand a half-shipped release: the image was built in the
+  # build job, and web/dist is built below before either deploy step).
+  # Deploy order defaults to API first, then frontend — the old frontend
+  # must keep working against the new API anyway. Label the PR
+  # `web-first` before merging to flip the order (e.g. when the new
+  # frontend must land before an API change breaks the old one).
   deploy:
-    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
-    needs: [build]
+    # !cancelled() so this still runs when build was skipped (web- or
+    # infra-only PRs); build's result is checked explicitly instead.
+    if: >-
+      !cancelled() &&
+      needs.changes.result == 'success' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped') &&
+      (needs.changes.outputs.api == 'true' || needs.changes.outputs.web == 'true' || needs.changes.outputs.infra == 'true')
+    needs: [changes, build]
     runs-on: ubuntu-latest
     environment: production
     permissions:
@@ -238,38 +291,37 @@ jobs:
         run: terraform apply -input=false tfplan
         working-directory: terraform
 
-      # The k8s API is reached only through the Cloudflare Tunnel: SSH to the
-      # node (gated by an Access Service Auth policy that admits only the CI
-      # service token), port-forward 6443, and use the node's own kubeconfig.
-      # k3s's /etc/rancher/k3s/k3s.yaml points at https://127.0.0.1:6443 —
-      # exactly where the forward lands — so it needs no rewriting and is
-      # always current, even right after a node recreation regenerates the CA.
-      - name: Install cloudflared
-        run: |
-          curl -fsSL -o /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i /tmp/cloudflared.deb
+      # ---- Build phase: everything compiles before anything deploys. ----
 
-      - name: Open tunnel to the node and fetch its kubeconfig
-        run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$CI_SSH_PRIVATE_KEY" > ~/.ssh/ci_key
-          chmod 600 ~/.ssh/ci_key
-          cat >> ~/.ssh/config <<'EOF'
-          Host burrito-node
-            HostName ssh-burrito.moldysandwich.com
-            User ubuntu
-            IdentityFile ~/.ssh/ci_key
-            StrictHostKeyChecking accept-new
-            ProxyCommand cloudflared access ssh --hostname %h
-          EOF
-          ssh burrito-node "sudo cat /etc/rancher/k3s/k3s.yaml" > "$RUNNER_TEMP/kubeconfig"
-          chmod 600 "$RUNNER_TEMP/kubeconfig"
-          echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
-          # Background port-forward; the process outlives this step, so the
-          # kubectl/helm steps below reach the API at 127.0.0.1:6443.
-          ssh -f -N -L 6443:127.0.0.1:6443 burrito-node
+      - uses: actions/setup-node@v4
+        if: needs.changes.outputs.web == 'true'
+        with:
+          node-version: 22
+
+      - name: Build frontend
+        if: needs.changes.outputs.web == 'true'
+        run: npm ci && npm run build
+        working-directory: web
+
+      # ---- Deploy phase. ----
+
+      - name: Deploy frontend first (PR labeled web-first)
+        if: >-
+          needs.changes.outputs.web == 'true' &&
+          contains(github.event.pull_request.labels.*.name, 'web-first')
+        uses: ./.github/actions/deploy-web
+        with:
+          cloudflare-api-token: ${{ env.TF_VAR_cloudflare_api_token }}
+          cloudflare-account-id: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Open tunnel kubectl access
+        if: needs.changes.outputs.api == 'true'
+        uses: ./.github/actions/tunnel-kubectl
+        with:
+          ci-ssh-private-key: ${{ env.CI_SSH_PRIVATE_KEY }}
 
       - name: Ensure namespace and OCIR pull secret
+        if: needs.changes.outputs.api == 'true'
         run: |
           kubectl create namespace burrito --dry-run=client -o yaml | kubectl apply -f -
           kubectl -n burrito create secret docker-registry ocir-pull \
@@ -278,22 +330,26 @@ jobs:
             --docker-password="$OCIR_TOKEN" \
             --dry-run=client -o yaml | kubectl apply -f -
 
+      # --atomic: if the rollout itself fails (pods never go ready), helm
+      # rolls straight back to the previous revision instead of leaving a
+      # broken release. Failures *after* helm returns (e.g. the healthz
+      # verify below) are what the manual rollback workflow is for.
       - name: Helm deploy
+        if: needs.changes.outputs.api == 'true'
         run: |
           helm upgrade --install burrito ./helm/burrito \
             --namespace burrito \
             --set image.repository="${{ env.OCI_REGISTRY }}/burrito/app" \
             --set image.tag="${{ github.event.pull_request.merge_commit_sha }}" \
             --set postgres.password="$POSTGRES_PASSWORD" \
-            --wait --timeout 5m
+            --atomic --wait --timeout 5m
 
       # Hits the public HTTPS hostname, so this exercises the whole path:
       # DNS -> Cloudflare edge TLS -> tunnel -> Traefik -> app -> Postgres.
       # Retried because the pod rollover can serve a brief 503 right after
-      # helm --wait returns (readiness gates the pod, not the app→DB path),
-      # and on the first rollout the tunnel ingress rule / DNS record from
-      # the terraform apply above take a little while to propagate.
+      # helm --wait returns (readiness gates the pod, not the app→DB path).
       - name: Verify /healthz over HTTPS
+        if: needs.changes.outputs.api == 'true'
         run: |
           for i in $(seq 1 24); do
             if curl -sf "https://api-burrito.moldysandwich.com/healthz"; then
@@ -305,35 +361,11 @@ jobs:
           echo "::error::/healthz did not return 200 within 2m"
           exit 1
 
-      - uses: actions/setup-node@v4
+      - name: Deploy frontend (default order — after the API)
+        if: >-
+          needs.changes.outputs.web == 'true' &&
+          !contains(github.event.pull_request.labels.*.name, 'web-first')
+        uses: ./.github/actions/deploy-web
         with:
-          node-version: 22
-
-      - name: Build frontend
-        run: npm ci && npm run build
-        working-directory: web
-
-      # Uploads the build to the Pages project terraform manages
-      # (frontend.tf). Reuses the terraform Cloudflare token, which must
-      # carry the account-level "Cloudflare Pages: Edit" permission.
-      - name: Deploy frontend to Cloudflare Pages
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ env.TF_VAR_cloudflare_api_token }}
-          accountId: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy web/dist --project-name=burrito-web --branch=main
-
-      # Generous retry window: the very first deploy has to wait for
-      # Cloudflare to issue the custom-domain certificate.
-      - name: Verify frontend
-        run: |
-          for i in $(seq 1 30); do
-            if curl -sf -o /dev/null "https://burrito.moldysandwich.com/"; then
-              echo "frontend OK"
-              exit 0
-            fi
-            echo "frontend not ready yet (attempt $i), retrying in 10s..."
-            sleep 10
-          done
-          echo "::error::https://burrito.moldysandwich.com did not return 200 within 5m"
-          exit 1
+          cloudflare-api-token: ${{ env.TF_VAR_cloudflare_api_token }}
+          cloudflare-account-id: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
