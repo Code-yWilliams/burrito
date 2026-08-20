@@ -1,6 +1,16 @@
 #cloud-config
 package_update: true
 
+write_files:
+  # Single source of truth for the cloudflared install lives in
+  # scripts/bootstrap-cloudflared.sh (repo-tracked, reviewable) — embedded
+  # here rather than duplicated inline so cloud-init and a manual re-run
+  # against an existing node always run the exact same script.
+  - path: /opt/bootstrap-cloudflared.sh
+    permissions: '0755'
+    encoding: b64
+    content: ${bootstrap_cloudflared_b64}
+
 runcmd:
   # OCI Ubuntu images ship iptables REJECT rules that block everything except
   # SSH at the OS level. Network security is enforced by the cloud NSG, so
@@ -19,8 +29,4 @@ runcmd:
     curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=stable INSTALL_K3S_EXEC="server --tls-san $PUBLIC_IP" sh -
   # cloudflared: the only path CI uses to reach this node (SSH over an
   # outbound-only tunnel) — the k8s API itself is never exposed publicly.
-  - curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg -o /usr/share/keyrings/cloudflare-main.gpg
-  - echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' > /etc/apt/sources.list.d/cloudflared.list
-  - apt-get update
-  - apt-get install -y cloudflared
-  - cloudflared service install ${cloudflare_tunnel_token}
+  - /opt/bootstrap-cloudflared.sh ${cloudflare_tunnel_token}

@@ -38,7 +38,8 @@ resource "oci_core_instance" "k3s" {
   metadata = {
     ssh_authorized_keys = join("\n", [var.ssh_public_key, var.ci_ssh_public_key])
     user_data = base64encode(templatefile("${path.module}/cloud-init.yaml.tpl", {
-      cloudflare_tunnel_token = data.cloudflare_zero_trust_tunnel_cloudflared_token.burrito.token
+      cloudflare_tunnel_token   = data.cloudflare_zero_trust_tunnel_cloudflared_token.burrito.token
+      bootstrap_cloudflared_b64 = filebase64("${path.module}/../scripts/bootstrap-cloudflared.sh")
     }))
   }
 
