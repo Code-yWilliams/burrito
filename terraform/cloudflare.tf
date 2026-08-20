@@ -71,18 +71,20 @@ resource "cloudflare_zero_trust_access_application" "ssh_tunnel" {
   # the tunnel/node for anyone/anything not matching this policy.
   policies = [
     {
-      name       = "CI service token only"
-      decision   = "allow"
+      name = "CI service token only"
+      # Service tokens are only honored by a "Service Auth" (non_identity)
+      # policy. An "allow" policy demands an identity from SSO, so even a
+      # valid service token falls through to the interactive login page --
+      # Access's redirect JWT shows service_token_status:true (token
+      # recognized) alongside auth_status:NONE (not accepted as auth),
+      # which is how this was diagnosed.
+      decision   = "non_identity"
       precedence = 1
       include = [
         {
           # token_id is the service token's resource id (a UUID), not its
-          # client_id -- confirmed against the live API, which rejects
-          # client_id outright ("service token not found"). A prior commit
-          # briefly "fixed" this to client_id based on a manual SSH test
-          # that fell back to browser auth; that diagnosis was wrong (the
-          # apply itself failed against the real API), and the actual
-          # cause of that test failure is still open.
+          # client_id -- the live API rejects client_id outright with
+          # "service token not found".
           service_token = {
             token_id = cloudflare_zero_trust_access_service_token.ci.id
           }
