@@ -61,13 +61,13 @@ variable "cloudflare_account_id" {
 }
 
 variable "node_ocpus" {
-  description = "OCPUs for the k3s node (Always Free A1 allowance is 4 total)"
+  description = "OCPUs for the k3s node (Always Free A1 allowance is 2 total, cut from 4 in June 2026)"
   type        = number
   default     = 1
 }
 
 variable "node_memory_gb" {
-  description = "Memory in GB for the k3s node (Always Free A1 allowance is 24 total)"
+  description = "Memory in GB for the k3s node (Always Free A1 allowance is 12 total, cut from 24 in June 2026)"
   type        = number
   default     = 6
 }
