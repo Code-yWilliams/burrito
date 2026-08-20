@@ -32,11 +32,15 @@ Live: <https://burrito.moldysandwich.com> (frontend) →
   (TLS terminates at Cloudflare's edge — no certs on the node).
 - **CI/CD (.github/workflows/deploy.yml)** — on every PR and push to main:
   both packages built (`check`) and `terraform plan`, diff in the job
-  summary. On merge, an image build to OCIR runs too, then the run
-  **pauses on the `production` environment**; approving it in the GitHub
-  UI applies the reviewed plan file, runs `helm upgrade --install`,
-  verifies `/healthz` over HTTPS, then uploads the frontend build with
-  `wrangler pages deploy` and verifies it too.
+  summary. On merge, a `changes` job classifies the PR's files and
+  **only what changed deploys** (`app/`+`helm/` → image build + helm;
+  `web/` → Pages upload; `terraform/` → apply only; docs-only merges
+  skip deploy entirely). The run **pauses on the `production`
+  environment**; approving it applies the reviewed plan file, then
+  builds everything before deploying anything, deploys the API first and
+  the frontend second (label the PR `web-first` before merging to flip),
+  verifying each over HTTPS. `rollback.yml` (manual dispatch,
+  `target: api|web`) rolls one package back to its previous version.
 
 ### Why AWS_* variables in an OCI project?
 
@@ -87,7 +91,12 @@ than sharing a private key directly (not recommended).
 ## Day-to-day
 
 - Change infra or app → PR (plan diff, no apply) → merge → approve the
-  `production` deployment in the Actions UI → applied + deployed.
+  `production` deployment in the Actions UI → applied + deployed (only
+  the packages the PR touched; add the `web-first` label before merging
+  to deploy the frontend before the API).
+- Roll back one package: `gh workflow run rollback -f target=api` (or
+  `target=web`), or trigger it from the Actions UI. API → previous Helm
+  revision; web → previous Pages production deployment.
 - Local kubectl: `scripts/fetch-kubeconfig.sh <node-ip>` fetches the node's
   kubeconfig (it points at `https://127.0.0.1:6443` — the k8s API is not
   publicly exposed), then open the SSH port-forward the script prints and

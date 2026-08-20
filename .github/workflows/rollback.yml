@@ -1,0 +1,96 @@
+name: rollback
+
+# Manually-triggered, one package at a time: roll the API back to its
+# previous Helm revision, or the frontend back to its previous Cloudflare
+# Pages production deployment. The playbook for a half-shipped release
+# (one package deployed, the other's deploy failed) is to either fix
+# forward with a new PR or run this against the package that DID deploy.
+#
+# No `production` environment gate: dispatching this workflow is already
+# an explicit human action, and rollbacks are exactly when approval
+# friction hurts most. The shared concurrency group still guarantees a
+# rollback never races a deploy.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Which package to roll back to its previous version
+        type: choice
+        required: true
+        options:
+          - api
+          - web
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+env:
+  # Not secret (same value as the terraform/variables.tf default).
+  CLOUDFLARE_ACCOUNT_ID: a2307e3c074e5ba8067e3220eeaf53c0
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout only so the local composite action is available.
+      - uses: actions/checkout@v4
+
+      - name: Load secrets from 1Password
+        uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          TF_VAR_cloudflare_api_token: op://Burrito/burrito-ci/TF_VAR_cloudflare_api_token
+          CI_SSH_PRIVATE_KEY: op://Burrito/burrito-ci/CI_SSH_PRIVATE_KEY
+          TUNNEL_SERVICE_TOKEN_ID: op://Burrito/burrito-ci/CF_ACCESS_CLIENT_ID
+          TUNNEL_SERVICE_TOKEN_SECRET: op://Burrito/burrito-ci/CF_ACCESS_CLIENT_SECRET
+
+      - name: Open tunnel kubectl access
+        if: inputs.target == 'api'
+        uses: ./.github/actions/tunnel-kubectl
+        with:
+          ci-ssh-private-key: ${{ env.CI_SSH_PRIVATE_KEY }}
+
+      # `helm rollback` with no revision targets the previous one; release
+      # values (including image.tag, so the previously-deployed image)
+      # roll back with it. Old images stay in OCIR, so the tag resolves.
+      - name: Roll back the API to the previous Helm revision
+        if: inputs.target == 'api'
+        run: |
+          helm history burrito -n burrito --max 5
+          helm rollback burrito -n burrito --wait --timeout 5m
+          for i in $(seq 1 24); do
+            if curl -sf "https://api-burrito.moldysandwich.com/healthz"; then
+              exit 0
+            fi
+            echo "healthz not ready yet (attempt $i), retrying in 5s..."
+            sleep 5
+          done
+          echo "::error::/healthz did not return 200 within 2m after rollback"
+          exit 1
+
+      # Pages keeps every deployment; "rollback" just re-points production
+      # at an older one. Previous = newest production deployment that is
+      # not the currently-live (canonical) one.
+      - name: Roll back the frontend to the previous Pages deployment
+        if: inputs.target == 'web'
+        run: |
+          BASE="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/burrito-web"
+          AUTH="Authorization: Bearer $TF_VAR_cloudflare_api_token"
+          LIVE=$(curl -sf -H "$AUTH" "$BASE" | jq -r '.result.canonical_deployment.id')
+          PREV=$(curl -sf -H "$AUTH" "$BASE/deployments?env=production" \
+            | jq -r --arg live "$LIVE" '[.result[] | select(.id != $live)][0].id // empty')
+          if [ -z "$PREV" ]; then
+            echo "::error::No previous production deployment to roll back to."
+            exit 1
+          fi
+          echo "Rolling back production from deployment $LIVE to $PREV"
+          curl -sf -X POST -H "$AUTH" "$BASE/deployments/$PREV/rollback" > /dev/null
+          NOW=$(curl -sf -H "$AUTH" "$BASE" | jq -r '.result.canonical_deployment.id')
+          if [ "$NOW" != "$PREV" ]; then
+            echo "::error::Rollback did not take effect (live deployment is $NOW)"
+            exit 1
+          fi
+          echo "Frontend rolled back to deployment $PREV"
