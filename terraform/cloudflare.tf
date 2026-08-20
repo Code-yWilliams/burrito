@@ -76,8 +76,13 @@ resource "cloudflare_zero_trust_access_application" "ssh_tunnel" {
       precedence = 1
       include = [
         {
+          # token_id here must be the token's client_id (what's actually
+          # sent as Cf-Access-Client-Id at auth time), not its resource id
+          # (an unrelated internal UUID) -- confirmed by testing against
+          # the real API after the resource id version silently failed
+          # auth and fell back to interactive browser login.
           service_token = {
-            token_id = cloudflare_zero_trust_access_service_token.ci.id
+            token_id = cloudflare_zero_trust_access_service_token.ci.client_id
           }
         }
       ]
