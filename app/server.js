@@ -7,6 +7,11 @@ const pool = new Pool({ connectionTimeoutMillis: 3000 });
 const port = process.env.PORT || 3000;
 
 const server = http.createServer(async (req, res) => {
+  if (req.method === 'GET' && req.url === '/version') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ version: require('./package.json').version }));
+    return;
+  }
   if (req.method === 'GET' && req.url === '/healthz') {
     try {
       await pool.query('SELECT 1');
