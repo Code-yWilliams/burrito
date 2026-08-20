@@ -1,5 +1,5 @@
 image:
-  repository: sjc.ocir.io/ax9hmp43wxua/burrito/app
+  repository: sjc.ocir.io/ax9hmp43wxua/burrito/app # overridden with $OCI_REGISTRY by CI
   tag: latest # overridden with the git SHA by CI
   pullPolicy: IfNotPresent
 

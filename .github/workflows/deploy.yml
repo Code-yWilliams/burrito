@@ -3,6 +3,7 @@ name: plan-and-deploy
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, closed]
   push:
     branches: [main]
 
@@ -12,6 +13,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # OCI tenancy Object Storage namespace, also used as the OCIR registry
+  # namespace segment. Immutable for the life of the tenancy; set once as a
+  # repo variable (Settings > Secrets and variables > Actions > Variables)
+  # rather than duplicated as a literal across this file and values.yaml.
+  OCI_REGISTRY: sjc.ocir.io/${{ vars.OCI_NAMESPACE }}
   TF_IN_AUTOMATION: "true"
   # OCI's S3-compatible API rejects the AWS SDK's default integrity checksums
   # ("AWS chunked encoding not supported"); only send them when required.
@@ -19,25 +25,34 @@ env:
   AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
 
 jobs:
-  # Always runs (PRs and pushes). Produces the terraform diff in the job
-  # summary and, on pushes, saves the plan file so deploy applies exactly
-  # what was reviewed.
+  # Runs for every PR push (opened/synchronize/reopened) and for direct
+  # pushes to main, but NOT for the PR "closed" event. Produces the
+  # terraform diff in the job summary and uploads the plan file, keyed to
+  # the commit it was computed from, so deploy can apply exactly what was
+  # reviewed here instead of re-planning after merge.
   plan:
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: terraform
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.OCI_S3_ACCESS_KEY }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.OCI_S3_SECRET_KEY }}
-      TF_VAR_tenancy_ocid: ${{ secrets.OCI_TENANCY_OCID }}
-      TF_VAR_user_ocid: ${{ secrets.OCI_USER_OCID }}
-      TF_VAR_fingerprint: ${{ secrets.OCI_FINGERPRINT }}
-      TF_VAR_oci_private_key: ${{ secrets.OCI_PRIVATE_KEY }}
-      TF_VAR_my_ip_cidr: ${{ secrets.MY_IP_CIDR }}
-      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Load secrets from 1Password
+        uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          AWS_ACCESS_KEY_ID: op://Burrito/burrito-ci/AWS_ACCESS_KEY_ID
+          AWS_SECRET_ACCESS_KEY: op://Burrito/burrito-ci/AWS_SECRET_ACCESS_KEY
+          TF_VAR_tenancy_ocid: op://Burrito/burrito-ci/TF_VAR_tenancy_ocid
+          TF_VAR_user_ocid: op://Burrito/burrito-ci/TF_VAR_user_ocid
+          TF_VAR_fingerprint: op://Burrito/burrito-ci/TF_VAR_fingerprint
+          TF_VAR_oci_private_key: op://Burrito/burrito-ci/TF_VAR_oci_private_key
+          TF_VAR_ssh_public_key: op://Burrito/burrito-ci/TF_VAR_ssh_public_key
+          TF_VAR_my_ip_cidr: op://Burrito/burrito-ci/TF_VAR_my_ip_cidr
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -59,26 +74,39 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload plan for the deploy job
-        if: github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
-          name: tfplan
+          name: tfplan-${{ github.event.pull_request.head.sha || github.sha }}
           path: terraform/tfplan
-          retention-days: 1
+          retention-days: 5
 
   # Builds the app image on a native arm64 runner (free for public repos)
-  # and pushes it to OCIR tagged with the commit SHA.
+  # and pushes it to OCIR tagged with the commit SHA. Only runs once a PR
+  # is actually merged — never for a plain push to main.
   build:
-    if: github.event_name == 'push'
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
     runs-on: ubuntu-24.04-arm
     steps:
+      # Build from the actual commit that landed on main, not the
+      # ephemeral pull_request merge-preview ref.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Load secrets from 1Password
+        uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          OCIR_USERNAME: op://Burrito/burrito-ci/OCIR_USERNAME
+          OCIR_TOKEN: op://Burrito/burrito-ci/OCIR_TOKEN
 
       - uses: docker/login-action@v3
         with:
           registry: sjc.ocir.io
-          username: ${{ secrets.OCIR_USERNAME }}
-          password: ${{ secrets.OCIR_TOKEN }}
+          username: ${{ env.OCIR_USERNAME }}
+          password: ${{ env.OCIR_TOKEN }}
 
       - uses: docker/build-push-action@v6
         with:
@@ -86,27 +114,46 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: |
-            sjc.ocir.io/ax9hmp43wxua/burrito/app:${{ github.sha }}
-            sjc.ocir.io/ax9hmp43wxua/burrito/app:latest
+            ${{ env.OCI_REGISTRY }}/burrito/app:${{ github.event.pull_request.merge_commit_sha }}
+            ${{ env.OCI_REGISTRY }}/burrito/app:latest
 
   # Gated by the "production" environment: the run pauses here until approved
-  # in the GitHub UI. Then: terraform apply (the reviewed plan) + helm deploy.
+  # in the GitHub UI. Applies the exact plan file produced during the PR's
+  # own plan run — never a freshly regenerated one — so what gets applied
+  # is provably what was reviewed pre-merge. Branch protection requires the
+  # "plan" check to pass before a PR can merge, which guarantees that
+  # artifact exists by the time this job looks for it.
   deploy:
-    if: github.event_name == 'push'
-    needs: [plan, build]
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
+    needs: [build]
     runs-on: ubuntu-latest
     environment: production
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.OCI_S3_ACCESS_KEY }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.OCI_S3_SECRET_KEY }}
-      TF_VAR_tenancy_ocid: ${{ secrets.OCI_TENANCY_OCID }}
-      TF_VAR_user_ocid: ${{ secrets.OCI_USER_OCID }}
-      TF_VAR_fingerprint: ${{ secrets.OCI_FINGERPRINT }}
-      TF_VAR_oci_private_key: ${{ secrets.OCI_PRIVATE_KEY }}
-      TF_VAR_my_ip_cidr: ${{ secrets.MY_IP_CIDR }}
-      TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Load secrets from 1Password
+        uses: 1password/load-secrets-action@v2
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          AWS_ACCESS_KEY_ID: op://Burrito/burrito-ci/AWS_ACCESS_KEY_ID
+          AWS_SECRET_ACCESS_KEY: op://Burrito/burrito-ci/AWS_SECRET_ACCESS_KEY
+          TF_VAR_tenancy_ocid: op://Burrito/burrito-ci/TF_VAR_tenancy_ocid
+          TF_VAR_user_ocid: op://Burrito/burrito-ci/TF_VAR_user_ocid
+          TF_VAR_fingerprint: op://Burrito/burrito-ci/TF_VAR_fingerprint
+          TF_VAR_oci_private_key: op://Burrito/burrito-ci/TF_VAR_oci_private_key
+          TF_VAR_ssh_public_key: op://Burrito/burrito-ci/TF_VAR_ssh_public_key
+          TF_VAR_my_ip_cidr: op://Burrito/burrito-ci/TF_VAR_my_ip_cidr
+          OCIR_USERNAME: op://Burrito/burrito-ci/OCIR_USERNAME
+          OCIR_TOKEN: op://Burrito/burrito-ci/OCIR_TOKEN
+          POSTGRES_PASSWORD: op://Burrito/burrito-ci/POSTGRES_PASSWORD
+          KUBECONFIG_B64: op://Burrito/burrito-ci/KUBECONFIG_B64
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -115,25 +162,41 @@ jobs:
       - run: terraform init -input=false
         working-directory: terraform
 
-      - uses: actions/download-artifact@v4
+      - name: Locate the PR's plan run
+        id: find_run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_NAME: tfplan-${{ github.event.pull_request.head.sha }}
+        run: |
+          RUN_ID=$(gh api "repos/${{ github.repository }}/actions/artifacts?name=$ARTIFACT_NAME" \
+            --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .workflow_run.id')
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" == "null" ]; then
+            echo "::error::No plan artifact found for PR head ${{ github.event.pull_request.head.sha }} (name $ARTIFACT_NAME)." \
+              "It may have expired (5-day retention) or the plan job never completed for this commit." \
+              "Push a new commit to the branch (or reopen the PR) so a fresh plan runs, then merge again."
+            exit 1
+          fi
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Download the exact plan reviewed in the PR
+        uses: actions/download-artifact@v4
         with:
-          name: tfplan
+          name: tfplan-${{ github.event.pull_request.head.sha }}
+          run-id: ${{ steps.find_run.outputs.run_id }}
+          github-token: ${{ github.token }}
           path: terraform
 
-      - name: Terraform apply (reviewed plan)
+      - name: Terraform apply (exact plan reviewed in the PR)
         run: terraform apply -input=false tfplan
         working-directory: terraform
 
       - name: Write kubeconfig
         run: |
-          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$RUNNER_TEMP/kubeconfig"
+          echo "$KUBECONFIG_B64" | base64 -d > "$RUNNER_TEMP/kubeconfig"
           chmod 600 "$RUNNER_TEMP/kubeconfig"
           echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
 
       - name: Ensure namespace and OCIR pull secret
-        env:
-          OCIR_USERNAME: ${{ secrets.OCIR_USERNAME }}
-          OCIR_TOKEN: ${{ secrets.OCIR_TOKEN }}
         run: |
           kubectl create namespace burrito --dry-run=client -o yaml | kubectl apply -f -
           kubectl -n burrito create secret docker-registry ocir-pull \
@@ -143,12 +206,11 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Helm deploy
-        env:
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
         run: |
           helm upgrade --install burrito ./helm/burrito \
             --namespace burrito \
-            --set image.tag="${{ github.sha }}" \
+            --set image.repository="${{ env.OCI_REGISTRY }}/burrito/app" \
+            --set image.tag="${{ github.event.pull_request.merge_commit_sha }}" \
             --set postgres.password="$POSTGRES_PASSWORD" \
             --wait --timeout 5m
 
