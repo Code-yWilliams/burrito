@@ -34,10 +34,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Checkout only so the local composite action is available.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Load secrets from 1Password
-        uses: 1password/load-secrets-action@v2
+        uses: 1password/load-secrets-action@v5
         with:
           export-env: true
         env:
